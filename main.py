@@ -9,7 +9,7 @@ import uuid
 import json
 import base64
 from typing import List, Optional, Union
-from urllib.parse import urlparse
+from urllib.parse import urlparse, quote, unquote  # ✅ 这里加了 quote / unquote
 from datetime import datetime, timedelta
 
 import requests
@@ -244,6 +244,11 @@ async def generate_document(request: GenerateRequest):
             process_document(doc, keys, values)
             
             output_filename = generate_filename(request.template_file_url, request.filename)
+
+            # ======================
+            # ✅ 核心修复：中文文件名编码
+            # ======================
+            encoded_filename = quote(output_filename, encoding="utf-8")
             
             import io
             buffer = io.BytesIO()
@@ -251,18 +256,19 @@ async def generate_document(request: GenerateRequest):
             file_bytes = buffer.getvalue()
             
             # 存到内存，2小时内可下载
-            file_store[output_filename] = {
+            file_store[encoded_filename] = {  # ✅ 存编码后的文件名
                 "data": file_bytes,
-                "expires": datetime.now() + timedelta(hours=2)
+                "expires": datetime.now() + timedelta(hours=2),
+                "real_name": output_filename  # 保存真实中文名
             }
             
-            download_url = f"{BASE_URL}/download/{output_filename}"
+            download_url = f"{BASE_URL}/download/{encoded_filename}"
             
             return JSONResponse({
                 "success": True,
                 "message": "文档生成成功",
                 "full_download_url": download_url,
-                "filename": output_filename,
+                "filename": output_filename,  # ✅ 返回真实中文名
                 "replaced_count": len(keys)
             })
         finally:
@@ -277,14 +283,20 @@ async def generate_document(request: GenerateRequest):
 @app.get("/download/{filename}")
 async def download_file_endpoint(filename: str):
     filename = os.path.basename(filename)
-    
+
+    # ======================
+    # ✅ 修复下载：支持中文
+    # ======================
     if filename in file_store:
         item = file_store[filename]
         if datetime.now() < item["expires"]:
+            real_name = item["real_name"]
+            # 浏览器下载时显示正确中文
+            content_disposition = f"attachment; filename*=utf-8''{quote(real_name)}"
             return Response(
                 content=item["data"],
                 media_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-                headers={"Content-Disposition": f"attachment; filename={filename}"}
+                headers={"Content-Disposition": content_disposition}
             )
         else:
             del file_store[filename]
