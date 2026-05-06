@@ -397,6 +397,7 @@ def process_paragraph(paragraph, keys, values):
                 br_run.append(br)
                 p_elem.append(br_run)
 
+
 def process_table(table, keys, values):
     for row in table.rows:
         for cell in row.cells:
