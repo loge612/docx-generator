@@ -122,6 +122,38 @@ def apply_formatting_to_run(run, formatting):
         run.font.color.rgb = formatting["font.color.rgb"]
 
 
+def parse_colored_segments(value):
+    """
+    解析 <red>文字</red> 标记
+    返回 [(文字, is_red), ...]
+    示例：
+        "hello <red>世界</red> end"
+        → [("hello ", False), ("世界", True), (" end", False)]
+    """
+    segments = []
+    pattern = re.compile(r'<red>(.*?)</red>', re.DOTALL)
+    last_end = 0
+
+    for match in pattern.finditer(value):
+        if match.start() > last_end:
+            segments.append((value[last_end:match.start()], False))
+        segments.append((match.group(1), True))
+        last_end = match.end()
+
+    if last_end < len(value):
+        segments.append((value[last_end:], False))
+
+    if not segments:
+        segments = [(value, False)]
+
+    return segments
+
+
+def has_color_tag(text):
+    """判断文本中是否含有<red>标签"""
+    return '<red>' in text and '</red>' in text
+
+
 def set_cell_border(cell):
     """设置单元格边框"""
     tc = cell._tc
@@ -171,24 +203,21 @@ def build_research_table(doc, table_data):
     ]
     """
     headers = ['序号', '原计划研发内容', '实际完成情况', '完成度', '未完成原因及说明']
-    
+
     table = doc.add_table(rows=1 + len(table_data), cols=len(headers))
     table.style = 'Table Grid'
 
-    # 设置列宽
     col_widths = [Inches(0.8), Inches(2.5), Inches(1.5), Inches(1.0), Inches(2.0)]
     for col_idx, width in enumerate(col_widths):
         for row in table.rows:
             row.cells[col_idx].width = width
 
-    # 写表头
     for col_idx, header in enumerate(headers):
         cell = table.cell(0, col_idx)
         set_cell_background(cell, 'D9E1F2')
         set_cell_border(cell)
         set_cell_text(cell, header, bold=True)
 
-    # 写数据行
     for row_idx, row_data in enumerate(table_data):
         for col_idx, value in enumerate(row_data):
             cell = table.cell(row_idx + 1, col_idx)
@@ -207,7 +236,6 @@ def replace_placeholder_with_table(doc, placeholder, table_data):
     target_para = None
     target_idx = None
 
-    # 遍历body中所有元素，找到占位符段落
     body = doc.element.body
     body_elements = list(body)
 
@@ -221,18 +249,14 @@ def replace_placeholder_with_table(doc, placeholder, table_data):
                 break
 
     if target_para is None:
-        return False  # 没找到占位符
+        return False
 
-    # 在占位符段落前插入表格
-    # 先构建一个临时doc来获取表格XML
     tmp_doc = Document()
     tmp_table = build_research_table(tmp_doc, table_data)
     tbl_element = tmp_table._tbl
 
-    # 把表格XML插入到目标段落之前
     target_para._element.addprevious(tbl_element)
 
-    # 删除占位符段落
     parent = target_para._element.getparent()
     parent.remove(target_para._element)
 
@@ -246,6 +270,8 @@ def process_paragraph(paragraph, keys, values):
     original_text = para_info["text"]
     if not original_text:
         return
+
+    # 检查是否有占位符
     has_placeholder = False
     for key in keys:
         if re.search(r'\{\{\s*' + re.escape(key) + r'\s*\}\}', original_text):
@@ -253,21 +279,123 @@ def process_paragraph(paragraph, keys, values):
             break
     if not has_placeholder:
         return
+
+    # 替换后的文本
     new_text = replace_placeholders_in_text(original_text, keys, values)
     if new_text == original_text:
         return
-    for run in paragraph.runs:
-        run.text = ""
-    lines = new_text.split('\n')
-    current_run = paragraph.runs[0]
-    for i, line in enumerate(lines):
-        if i == 0:
-            current_run.text = line
-        else:
-            current_run.add_break()
-            current_run.text += line
-    apply_formatting_to_run(current_run, para_info["formatting"])
 
+    # ============================================
+    # 判断是否需要处理红色标签
+    # ============================================
+    if not has_color_tag(new_text):
+        # ✅ 原来的逻辑：没有红色标签，直接替换
+        for run in paragraph.runs:
+            run.text = ""
+        lines = new_text.split('\n')
+        current_run = paragraph.runs[0]
+        for i, line in enumerate(lines):
+            if i == 0:
+                current_run.text = line
+            else:
+                current_run.add_break()
+                current_run.text += line
+        apply_formatting_to_run(current_run, para_info["formatting"])
+
+    else:
+        # ✅ 新逻辑：含有<red>标签，拆分成多个run
+        formatting = para_info["formatting"]
+
+        # 清空所有现有runs
+        p_elem = paragraph._p
+        for run in paragraph.runs:
+            p_elem.remove(run._r)
+
+        # 按换行拆分
+        lines = new_text.split('\n')
+
+        for line_idx, line in enumerate(lines):
+            # 每行解析红色片段
+            segments = parse_colored_segments(line)
+
+            for seg_text, is_red in segments:
+                if not seg_text:
+                    continue
+
+                # 创建新run
+                new_run = OxmlElement('w:r')
+
+                # 复制格式 rPr
+                rPr = OxmlElement('w:rPr')
+
+                # 字体
+                if formatting.get("font.name"):
+                    rFonts = OxmlElement('w:rFonts')
+                    rFonts.set(qn('w:ascii'), formatting["font.name"])
+                    rFonts.set(qn('w:hAnsi'), formatting["font.name"])
+                    rFonts.set(qn('w:eastAsia'), formatting["font.name"])
+                    rPr.append(rFonts)
+
+                # 加粗
+                if formatting.get("bold"):
+                    bold_elem = OxmlElement('w:b')
+                    rPr.append(bold_elem)
+
+                # 斜体
+                if formatting.get("italic"):
+                    italic_elem = OxmlElement('w:i')
+                    rPr.append(italic_elem)
+
+                # 下划线
+                if formatting.get("underline"):
+                    u_elem = OxmlElement('w:u')
+                    u_elem.set(qn('w:val'), 'single')
+                    rPr.append(u_elem)
+
+                # 字号
+                if formatting.get("font.size"):
+                    try:
+                        font_size = formatting["font.size"]
+                        sz_val = str(int(font_size.pt * 2))
+                        sz = OxmlElement('w:sz')
+                        sz.set(qn('w:val'), sz_val)
+                        rPr.append(sz)
+                        szCs = OxmlElement('w:szCs')
+                        szCs.set(qn('w:val'), sz_val)
+                        rPr.append(szCs)
+                    except Exception:
+                        pass
+
+                # 颜色：红色 or 原色
+                color_elem = OxmlElement('w:color')
+                if is_red:
+                    color_elem.set(qn('w:val'), 'FF0000')
+                elif formatting.get("font.color.rgb"):
+                    color_elem.set(qn('w:val'), str(formatting["font.color.rgb"]))
+                else:
+                    color_elem.set(qn('w:val'), 'auto')
+                rPr.append(color_elem)
+
+                new_run.append(rPr)
+
+                # 文字内容
+                t_elem = OxmlElement('w:t')
+                t_elem.text = seg_text
+                # 保留首尾空格
+                if seg_text.startswith(' ') or seg_text.endswith(' '):
+                    t_elem.set(
+                        '{http://www.w3.org/XML/1998/namespace}space',
+                        'preserve'
+                    )
+                new_run.append(t_elem)
+                p_elem.append(new_run)
+
+            # 换行处理（非最后一行）
+            if line_idx < len(lines) - 1:
+                br_run = OxmlElement('w:r')
+                br = OxmlElement('w:br')
+                br_run.append(br)
+                p_elem.append(br_run)
 
 def process_table(table, keys, values):
     for row in table.rows:
@@ -285,8 +413,6 @@ def process_document(doc, keys, values):
     # =============================
     # ✅ 第一步：处理需要转表格的占位符
     # =============================
-    
-    # 找研发内容完成情况的数据
     table_placeholder = '研发内容完成情况'
     table_data_key_idx = None
     table_data = None
@@ -299,15 +425,12 @@ def process_document(doc, keys, values):
     if table_data_key_idx is not None:
         raw_value = values[table_data_key_idx]
         try:
-            # 期望传入JSON格式的二维数组
             table_data = json.loads(raw_value)
         except Exception:
-            # 如果不是JSON，fallback到文本替换
             table_data = None
 
         if table_data:
             replace_placeholder_with_table(doc, f'{{{{{table_placeholder}}}}}', table_data)
-            # 从keys/values中移除，避免后续文本替换再处理
             keys = [k for i, k in enumerate(keys) if i != table_data_key_idx]
             values = [v for i, v in enumerate(values) if i != table_data_key_idx]
 
@@ -353,7 +476,10 @@ async def generate_document(request: GenerateRequest):
         keys = parse_json_param(request.text_keys)
         values = parse_json_param(request.text_values)
         if len(keys) != len(values):
-            raise HTTPException(status_code=400, detail=f"text_keys数量({len(keys)})与text_values数量({len(values)})不匹配")
+            raise HTTPException(
+                status_code=400,
+                detail=f"text_keys数量({len(keys)})与text_values数量({len(values)})不匹配"
+            )
         if not keys:
             raise HTTPException(status_code=400, detail="text_keys不能为空")
 
@@ -392,7 +518,7 @@ async def generate_document(request: GenerateRequest):
                 "replaced_count": len(keys)
             })
         finally:
-             os.unlink(temp_input.name)
+            os.unlink(temp_input.name)
 
     except HTTPException:
         raise
