@@ -463,7 +463,7 @@ def generate_filename(original_url, custom_filename=None):
 
 @app.get("/")
 async def root():
-    return {"service": "制式文档生成API", "version": "1.2.0", "status": "running"}
+  return {"service": "制式文档生成API", "version": "1.2.0-red", "status": "running"}
 
 
 @app.get("/health")
